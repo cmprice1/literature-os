@@ -27,15 +27,19 @@ jobs:
       - name: Upload to HF Space (excluding README.md)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_USER: "cmprice1"         # Your HF username
+          HF_USER: "cmprice"         # Your HF username
           HF_SPACE: "literature-os"   # Your space name
         run: |
           python - << 'PY'
           import os
-          from huggingface_hub import upload_folder
+          from huggingface_hub import upload_folder, create_repo, repository_exists
 
           repo_id     = f"{os.environ['HF_USER']}/{os.environ['HF_SPACE']}"
           token       = os.environ["HF_TOKEN"]
+
+          # Create the repo if it doesn't exist
+          if not repository_exists(repo_id, token=token, repo_type="space"):
+              create_repo(repo_id, repo_type="space", token=token, exist_ok=True)
 
           # Upload everything at repo root except README.md and VCS files
           upload_folder(
