@@ -24,9 +24,8 @@ st.set_page_config(page_title="Literature OS", layout="wide")
 st.caption("Last updated via GitHub → HF sync ✅")
 
 @st.cache_resource
-
 def conn():
-    return psycopg.connect(st.secrets["DB_READER_DSN"])
+    return psycopg.connect(os.environ["DB_READER_DSN"])
 
 def load_tags_years(c):
     with c.cursor() as cur:
