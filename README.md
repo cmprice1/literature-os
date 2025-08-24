@@ -1,4 +1,3 @@
-
 ---
 title: literature-os
 emoji: 📚
