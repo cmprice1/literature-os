@@ -32,7 +32,7 @@ def get_db():
         raise
 
 @st.cache_data(ttl=300)
-def load_metadata(_conn):
+def get_metadata(_conn):
     """Load tags and years from database"""
     try:
         with _conn.cursor() as cur:
@@ -55,7 +55,7 @@ def load_metadata(_conn):
         return [], list(range(2010, 2026))
 
 @st.cache_data(ttl=300)
-def query_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
+def get_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
     """Query papers with filters"""
     try:
         sql = """
@@ -71,7 +71,6 @@ def query_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
         """
         params = []
         
-        # Apply filters
         if tags:
             sql += " AND id IN (SELECT paper_id FROM tags WHERE tag = ANY(%s))"
             params.append([str(t) for t in tags])
@@ -87,18 +86,15 @@ def query_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
             
         sql += " ORDER BY year DESC NULLS LAST, citation_count DESC NULLS LAST LIMIT 200"
         
-        # Run query
         with _conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
             
-        # Convert to DataFrame
         df = pd.DataFrame(
             rows,
             columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"]
         )
         
-        # Fix types
         df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
         df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce").fillna(0).astype(int)
         
@@ -112,12 +108,12 @@ def query_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
 st.title("Literature OS")
 st.caption("Last updated via GitHub → HF sync ✅")
 
-# Database connection
 try:
+    # Connect to database
     db = get_db()
     
     # Load filter options
-    tags, years = load_metadata(db)
+    tags, years = get_metadata(db)
     
     # Filter section
     st.subheader("📋 Filter Papers")
@@ -125,13 +121,11 @@ try:
     col1, col2 = st.columns(2)
     
     with col1:
-        # Search box
         search = st.text_input(
             "Search titles & abstracts",
             help="Enter keywords to search in paper titles and abstracts"
         )
         
-        # Year range
         year_range = st.slider(
             "Year range",
             min_value=2010,
@@ -141,15 +135,14 @@ try:
         )
     
     with col2:
-        # Tag selection
         selected_tags = st.multiselect(
             "Filter by tags",
             options=sorted(tags),
             help="Select tags to filter papers"
         )
     
-    # Query papers with filters
-    papers = query_papers(
+    # Query and display papers
+    papers = get_papers(
         db,
         tags=selected_tags,
         year_start=year_range[0],
@@ -157,16 +150,13 @@ try:
         search=search
     )
     
-    # Display results
     st.subheader(f"📚 Results ({len(papers)} papers)")
     
     if papers.empty:
         st.info("No papers found matching your criteria.")
     else:
-        # Add clickable DOI links
         papers['DOI'] = papers['DOI'].apply(lambda x: f'[{x}](https://doi.org/{x})' if x else '')
         
-        # Display table
         st.dataframe(
             papers,
             use_container_width=True,
@@ -178,7 +168,6 @@ try:
             hide_index=True
         )
         
-        # Download option
         csv = papers.to_csv(index=False).encode('utf-8')
         st.download_button(
             "📥 Download as CSV",
