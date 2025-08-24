@@ -125,14 +125,15 @@ def get_papers(tags: list[str] | None, year_start: int | None, year_end: int | N
 
     df = pd.DataFrame(rows, columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"]) if rows else pd.DataFrame(columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"])  
 
-    # Clean types
+    # Clean types (safe for Streamlit front-end)
     if not df.empty:
-        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+        # Use pandas nullable integers to avoid JS formatter crashes on NaN
+        df["Year"] = pd.to_numeric(df["Year"], errors="coerce").astype("Int64")
         df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce").fillna(0).astype(int)
-        # Turn DOI into a proper link URL (leave None for missing ones)
-        def to_doi_url(x: str) -> str | None:
+        # Build a plain-text DOI URL; avoid LinkColumn for now due to Streamlit bug with nulls
+        def to_doi_url(x: str) -> str:
             x = (x or "").strip()
-            return f"https://doi.org/{x}" if x else None
+            return f"https://doi.org/{x}" if x else ""
         df["DOI"] = df["DOI"].map(to_doi_url)
 
     return df
@@ -141,6 +142,30 @@ def get_papers(tags: list[str] | None, year_start: int | None, year_end: int | N
 # ──────────────────────────────────────────────────────────────────────────────
 # UI
 # ──────────────────────────────────────────────────────────────────────────────
+
+def render_results(df: pd.DataFrame) -> None:
+    """Render results in a way that won't take the app down if Streamlit's
+    dataframe frontend gets unhappy (e.g., with link columns / formatters)."""
+    try:
+        st.dataframe(
+            df,
+            use_container_width=True,
+            column_config={
+                "ID": st.column_config.TextColumn("ID"),
+                "Title": st.column_config.TextColumn("Title", width="medium"),
+                "Journal": st.column_config.TextColumn("Journal", width="small"),
+                # Avoid NumberColumn + %d which can crash on nulls; let Streamlit render natively
+                "Year": st.column_config.TextColumn("Year"),
+                "Citations": st.column_config.TextColumn("Citations"),
+                # Use plain text for DOI to sidestep LinkColumn-related crashes; users can click the full URL
+                "DOI": st.column_config.TextColumn("DOI"),
+            },
+            hide_index=True,
+        )
+    except Exception as e:
+        st.warning(f"Standard table renderer failed ({e}). Falling back to safe static table.")
+        st.table(df)
+
 st.title("Literature OS")
 st.caption("Last updated via GitHub → HF sync ✅")
 
@@ -200,19 +225,7 @@ st.subheader(f"📚 Results ({len(papers)} papers)")
 if papers.empty:
     st.info("No papers found matching your criteria.")
 else:
-    st.dataframe(
-        papers,
-        use_container_width=True,
-        column_config={
-            "ID": st.column_config.TextColumn("ID", help="Internal identifier"),
-            "Title": st.column_config.TextColumn("Title", width="medium"),
-            "Journal": st.column_config.TextColumn("Journal", width="small"),
-            "Year": st.column_config.NumberColumn("Year", format="%d"),
-            "Citations": st.column_config.NumberColumn("Citations", format="%d"),
-            "DOI": st.column_config.LinkColumn("DOI"),  # values are full URLs
-        },
-        hide_index=True,
-    )
+    render_results(papers)
 
     csv = papers.to_csv(index=False).encode("utf-8")
     st.download_button(
