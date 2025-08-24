@@ -32,13 +32,16 @@ jobs:
         run: |
           python - << 'PY'
           import os
-          from huggingface_hub import upload_folder, create_repo, repository_exists
+          from huggingface_hub import upload_folder, create_repo, HfApi
 
           repo_id     = f"{os.environ['HF_USER']}/{os.environ['HF_SPACE']}"
           token       = os.environ["HF_TOKEN"]
+          api = HfApi()
 
           # Create the repo if it doesn't exist
-          if not repository_exists(repo_id, token=token, repo_type="space"):
+          try:
+              api.repo_info(repo_id=repo_id, repo_type="space", token=token)
+          except Exception:
               create_repo(repo_id, repo_type="space", token=token, exist_ok=True)
 
           # Upload everything at repo root except README.md and VCS files
