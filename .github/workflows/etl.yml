@@ -1,0 +1,23 @@
+name: ETL
+on:
+  schedule:
+    - cron: "22 * * * *"
+  workflow_dispatch: {}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r etl/requirements.txt
+      - name: Run ETL
+        env:
+          ZOTERO_API_KEY: ${{ secrets.ZOTERO_API_KEY }}
+          ZOTERO_LIBRARY_TYPE: ${{ secrets.ZOTERO_LIBRARY_TYPE }}
+          ZOTERO_LIBRARY_ID: ${{ secrets.ZOTERO_LIBRARY_ID }}
+          UNPAYWALL_EMAIL: ${{ secrets.UNPAYWALL_EMAIL }}
+          DB_WRITER_DSN: ${{ secrets.DB_WRITER_DSN }}
+          INBOX_COLLECTION: Inbox
+        run: python etl/run_etl.py
