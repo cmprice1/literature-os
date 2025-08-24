@@ -1,14 +1,15 @@
 ---
-title: Streamlit Template Space
+title: Literature Os2
 emoji: 🚀
 colorFrom: red
 colorTo: red
 sdk: docker
 app_port: 8501
 tags:
-  - streamlit
+- streamlit
 pinned: false
-short_description: Streamlit template space
+short_description: 2nd Try at Lit Space
+license: mit
 ---
 
 # Welcome to Streamlit!
