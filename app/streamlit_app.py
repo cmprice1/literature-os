@@ -120,9 +120,9 @@ def conn():
         raise
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_tags_years(c):
+def load_tags_years(_c):
     try:
-        with c.cursor() as cur:
+        with _c.cursor() as cur:
             # Load tags with error handling
             try:
                 cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
