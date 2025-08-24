@@ -22,6 +22,9 @@ import psycopg
 st.set_page_config(page_title="My Streamlit App", layout="wide")
 
 @st.cache_resource
+
+st.caption("Last updated via GitHub → HF sync ✅")
+
 def conn():
     return psycopg.connect(st.secrets["DB_READER_DSN"])
 
