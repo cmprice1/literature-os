@@ -3,10 +3,8 @@ title: Literature Os2
 emoji: 🚀
 colorFrom: red
 colorTo: red
-sdk: docker
+sdk: gradio
 app_port: 8501
-tags:
-- streamlit
 pinned: false
 short_description: 2nd Try at Lit Space
 license: mit
