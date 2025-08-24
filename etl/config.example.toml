@@ -1,0 +1,11 @@
+[zotero]
+library_type = "user"   # or "group"
+library_id = 15697666
+inbox_collection = "Inbox"
+
+[apis]
+unpaywall_email = "you@example.com"
+
+[etl]
+since_version_file = ".since"
+batch_size = 25
