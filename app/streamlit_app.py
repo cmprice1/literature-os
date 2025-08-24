@@ -1,4 +1,9 @@
-import streamlit as st, pandas as pd, psycopg
+import streamlit as st
+import pandas as pd
+import psycopg
+
+# Set up your page config
+st.set_page_config(page_title="My Streamlit App", layout="wide")
 
 @st.cache_resource
 def conn():
