@@ -1,17 +1,55 @@
-name: Sync with HF Space
+name: Sync to Hugging Face (ignore README)
 
 on:
   push:
-    branches: [main]   # run whenever you push to main
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: JacobLinCool/huggingface-sync@v1
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          github: ${{ secrets.GITHUB_TOKEN }}
-          user: cmprice
-          space: literature-os
-          token: ${{ secrets.HF_TOKEN }}
+          lfs: true          # if you use LFS elsewhere
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install huggingface_hub
+        run: |
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub>=0.22.0"
+
+      - name: Upload to HF Space (excluding README.md)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USER: "cmprice1"         # Your HF username
+          HF_SPACE: "literature-os"   # Your space name
+        run: |
+          python - << 'PY'
+          import os
+          from huggingface_hub import upload_folder
+
+          repo_id     = f"{os.environ['HF_USER']}/{os.environ['HF_SPACE']}"
+          token       = os.environ["HF_TOKEN"]
+
+          # Upload everything at repo root except README.md and VCS files
+          upload_folder(
+              repo_id=repo_id,
+              repo_type="space",
+              folder_path=".",
+              path_in_repo="",
+              allow_patterns=["**"],                       # include all
+              ignore_patterns=[
+                  "README.md", ".gitattributes",           # keep HF README as-is
+                  ".git/**", ".github/**",                 # CI / VCS noise
+                  "**/__pycache__/**", "**/*.pyc"
+              ],
+              commit_message="Sync from GitHub (excluding README.md)",
+              token=token,
+          )
+          PY
