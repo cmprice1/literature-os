@@ -1,3 +1,19 @@
+# --- put these lines at the very top (before importing streamlit) ---
+import os, pathlib
+
+# Choose a writable directory for Streamlit config (repo root works fine)
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]  # .../literature-os
+# If HOME is '/' or empty, redirect it to the project root
+if os.environ.get("HOME", "/") in ("/", "", None):
+    os.environ["HOME"] = str(PROJECT_ROOT)
+
+# Ensure config dir exists and point XDG there too
+os.environ.setdefault("XDG_CONFIG_HOME", os.environ["HOME"])
+CONFIG_DIR = os.path.join(os.environ["HOME"], ".streamlit")
+os.makedirs(CONFIG_DIR, exist_ok=True)
+# --------------------------------------------------------------------
+
+
 import streamlit as st
 import pandas as pd
 import psycopg
