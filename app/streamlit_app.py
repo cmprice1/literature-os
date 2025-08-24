@@ -1,5 +1,12 @@
 # --- put these lines at the very top (before importing streamlit) ---
-import os, pathlib
+import os
+import pathlib
+import logging
+from typing import List, Optional, Dict, Any
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Choose a writable directory for Streamlit config (repo root works fine)
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]  # .../literature-os
@@ -23,17 +30,58 @@ st.set_page_config(page_title="Literature OS", layout="wide")
 
 st.caption("Last updated via GitHub → HF sync ✅")
 
+# Initialize session state for error tracking
+if 'error_log' not in st.session_state:
+    st.session_state.error_log = []
+
+def log_error(e: Exception, context: str):
+    """Log error with context"""
+    error_msg = f"{context}: {str(e)}"
+    logger.error(error_msg)
+    st.session_state.error_log.append(error_msg)
+    return error_msg
+
 @st.cache_resource
 def conn():
-    return psycopg.connect(os.environ["DB_READER_DSN"])
+    try:
+        return psycopg.connect(
+            os.environ["DB_READER_DSN"],
+            application_name="literature-os-streamlit"
+        )
+    except Exception as e:
+        log_error(e, "Database connection failed")
+        raise
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_tags_years(c):
-    with c.cursor() as cur:
-        cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
-        tags = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT DISTINCT year FROM papers WHERE year IS NOT NULL ORDER BY year DESC")
-        years = [r[0] for r in cur.fetchall()]
-    return tags, years
+    try:
+        with c.cursor() as cur:
+            # Load tags with error handling
+            try:
+                cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
+                tags = [r[0] for r in cur.fetchall() if r[0]]  # Filter out None/empty tags
+            except Exception as e:
+                log_error(e, "Failed to load tags")
+                tags = []
+
+            # Load years with error handling
+            try:
+                cur.execute("""
+                    SELECT DISTINCT year 
+                    FROM papers 
+                    WHERE year IS NOT NULL 
+                        AND year BETWEEN 1900 AND 2100
+                    ORDER BY year DESC
+                """)
+                years = [r[0] for r in cur.fetchall() if r[0]]  # Filter out None years
+            except Exception as e:
+                log_error(e, "Failed to load years")
+                years = list(range(2010, 2026))  # Fallback years
+
+        return tags or [], years or list(range(2010, 2026))
+    except Exception as e:
+        log_error(e, "Failed to load metadata")
+        return [], list(range(2010, 2026))
 
 def safe_escape_like(text):
     """Safely escape LIKE pattern wildcards"""
@@ -104,84 +152,144 @@ def query(c, tags=None, y0=None, y1=None, q=None):
         # Return empty DataFrame instead of raising
         return pd.DataFrame(columns=["id","Title","Journal","Year","DOI","Citations"])
 
+# Initialize session state for filters
+if 'filters' not in st.session_state:
+    st.session_state.filters = {
+        'search': '',
+        'tags': [],
+        'year_range': (2015, 2025)
+    }
+
 # Main app with comprehensive error handling
 try:
     st.title("Literature OS - MVP")
     
-    # Database connection
-    try:
-        c = conn()
-        st.success("Connected to database ✅")
-    except Exception as e:
-        st.error(f"Database connection failed: {str(e)}")
-        st.stop()
+    # Show any accumulated errors in debug section
+    if st.session_state.error_log:
+        with st.expander("🔍 Debug Log", expanded=False):
+            for error in st.session_state.error_log:
+                st.error(error)
+    
+    # Database connection with retry
+    for attempt in range(3):  # Try 3 times
+        try:
+            c = conn()
+            st.success("Connected to database ✅")
+            break
+        except Exception as e:
+            if attempt == 2:  # Last attempt
+                st.error("Database connection failed")
+                st.error(str(e))
+                st.stop()
+            continue
 
-    # Load metadata
+    # Load metadata with fallbacks
     try:
         all_tags, years = load_tags_years(c)
-        if not years:
-            years = list(range(2010, 2026))  # Fallback year range
-        if not all_tags:
-            st.warning("No tags found in database")
-            all_tags = []
     except Exception as e:
-        st.error(f"Error loading metadata: {str(e)}")
-        st.stop()
+        st.error("Error loading filters")
+        with st.expander("Error details"):
+            st.code(str(e))
+        # Use fallback values
+        all_tags, years = [], list(range(2010, 2026))
 
     # Filter section in a container for visual grouping
     with st.container():
         st.subheader("📋 Filter Papers")
         
-        # Search box with clear instructions
-        q = st.text_input(
-            "Search titles & abstracts",
-            help="Enter keywords to search in paper titles and abstracts"
-        )
-
-        # Year range with safe defaults
-        col1, col2 = st.columns(2)
-        with col1:
-            yr_min = min(years) if years else 2010
-            yr_max = max(years) if years else 2025
-            yr0, yr1 = st.slider(
-                "Year range",
-                min_value=yr_min,
-                max_value=yr_max,
-                value=(max(2015, yr_min), yr_max),
-                help="Filter papers by publication year"
+        try:
+            # Search box with clear instructions
+            search_query = st.text_input(
+                "Search titles & abstracts",
+                value=st.session_state.filters.get('search', ''),
+                help="Enter keywords to search in paper titles and abstracts",
+                key="search_input"
             )
+            
+            # Update session state
+            st.session_state.filters['search'] = search_query
 
-        # Tags with categorized options
-        with col2:
-            prefix_map = {
-                "design:": "Research Design",
-                "domain:": "Domain",
-                "modality:": "Modality",
-                "dx:": "Diagnosis"
-            }
-            
-            # Group tags by prefix
-            tag_groups = {prefix: [] for prefix in prefix_map.keys()}
-            for tag in all_tags:
-                for prefix in prefix_map.keys():
-                    if tag.startswith(prefix):
-                        tag_groups[prefix].append(tag)
-                        break
-            
-            # Create multiselect for each group that has tags
-            sel_tags = []
-            for prefix, label in prefix_map.items():
-                if tag_groups[prefix]:
-                    group_tags = st.multiselect(
-                        label,
-                        options=sorted(tag_groups[prefix]),
-                        help=f"Select {label.lower()} tags to filter by"
-                    )
-                    sel_tags.extend(group_tags)
+            # Year range with safe defaults
+            col1, col2 = st.columns(2)
+            with col1:
+                try:
+                    yr_min = min(y for y in years if isinstance(y, (int, float)))
+                except ValueError:
+                    yr_min = 2010
+                try:
+                    yr_max = max(y for y in years if isinstance(y, (int, float)))
+                except ValueError:
+                    yr_max = 2025
+                
+                year_range = st.slider(
+                    "Year range",
+                    min_value=yr_min,
+                    max_value=yr_max,
+                    value=st.session_state.filters.get('year_range', (max(2015, yr_min), yr_max)),
+                    help="Filter papers by publication year",
+                    key="year_slider"
+                )
+                
+                # Update session state
+                st.session_state.filters['year_range'] = year_range
+
+            # Tags with categorized options
+            with col2:
+                prefix_map = {
+                    "design:": "Research Design",
+                    "domain:": "Domain",
+                    "modality:": "Modality",
+                    "dx:": "Diagnosis"
+                }
+                
+                try:
+                    # Group tags by prefix
+                    tag_groups = {prefix: [] for prefix in prefix_map.keys()}
+                    for tag in all_tags:
+                        if not isinstance(tag, str):
+                            continue
+                        for prefix in prefix_map.keys():
+                            if tag.startswith(prefix):
+                                tag_groups[prefix].append(tag)
+                                break
+                    
+                    # Create multiselect for each group that has tags
+                    selected_tags = []
+                    for prefix, label in prefix_map.items():
+                        if tag_groups[prefix]:
+                            group_key = f"tag_group_{prefix}"
+                            group_tags = st.multiselect(
+                                label,
+                                options=sorted(tag_groups[prefix]),
+                                default=st.session_state.filters.get('tags', []),
+                                help=f"Select {label.lower()} tags to filter by",
+                                key=group_key
+                            )
+                            selected_tags.extend(group_tags)
+                    
+                    # Update session state
+                    st.session_state.filters['tags'] = selected_tags
+                
+                except Exception as e:
+                    log_error(e, "Error in tag filtering")
+                    selected_tags = []
+                    
+        except Exception as e:
+            log_error(e, "Error in filter UI")
+            search_query = ""
+            year_range = (2015, 2025)
+            selected_tags = []
 
     # Query and display results
     try:
-        df = query(c, sel_tags, yr0, yr1, q)
+        # Get filter values from session state
+        yr0, yr1 = st.session_state.filters['year_range']
+        df = query(
+            c, 
+            st.session_state.filters['tags'],
+            yr0, yr1,
+            st.session_state.filters['search']
+        )
         
         # Results section
         st.subheader(f"📚 Results ({len(df)} papers)")
