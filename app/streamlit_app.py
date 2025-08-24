@@ -1,4 +1,5 @@
 import os
+import pathlib
 import streamlit as st
 import pandas as pd
 import psycopg
@@ -17,7 +18,7 @@ def get_connection():
 
 # Data loading functions
 @st.cache_data(ttl=300)
-def get_papers(conn, search=None):
+def get_papers(_conn, search=None):
     query = """
         SELECT 
             id,
@@ -31,7 +32,7 @@ def get_papers(conn, search=None):
         LIMIT 200
     """
     
-    with conn.cursor() as cur:
+    with _conn.cursor() as cur:
         cur.execute(query)
         rows = cur.fetchall()
         
@@ -104,7 +105,7 @@ if 'error_log' not in st.session_state:
 def log_error(e: Exception, context: str):
     """Log error with context"""
     error_msg = f"{context}: {str(e)}"
-    logger.error(error_msg)
+    st.error(error_msg)  # Use Streamlit's error display instead of logger
     st.session_state.error_log.append(error_msg)
     return error_msg
 
