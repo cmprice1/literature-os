@@ -19,11 +19,11 @@ import pandas as pd
 import psycopg
 
 # Set up your page config
-st.set_page_config(page_title="My Streamlit App", layout="wide")
-
-@st.cache_resource
+st.set_page_config(page_title="Literature OS", layout="wide")
 
 st.caption("Last updated via GitHub → HF sync ✅")
+
+@st.cache_resource
 
 def conn():
     return psycopg.connect(st.secrets["DB_READER_DSN"])
