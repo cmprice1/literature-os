@@ -1,12 +1,79 @@
-# --- put these lines at the very top (before importing streamlit) ---
 import os
-import pathlib
-import logging
-from typing import List, Optional, Dict, Any
+import streamlit as st
+import pandas as pd
+import psycopg
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Basic page config
+st.set_page_config(
+    page_title="Literature OS",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+
+# Database connection
+@st.cache_resource
+def get_connection():
+    return psycopg.connect(os.environ["DB_READER_DSN"])
+
+# Data loading functions
+@st.cache_data(ttl=300)
+def get_papers(conn, search=None):
+    query = """
+        SELECT 
+            id,
+            title,
+            journal,
+            year,
+            doi,
+            citation_count
+        FROM papers
+        ORDER BY year DESC NULLS LAST, citation_count DESC NULLS LAST
+        LIMIT 200
+    """
+    
+    with conn.cursor() as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+        
+    return pd.DataFrame(
+        rows,
+        columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"]
+    )
+
+# Main app
+st.title("Literature OS")
+
+try:
+    # Connect to database
+    conn = get_connection()
+    
+    # Load and display papers
+    papers = get_papers(conn)
+    
+    if not papers.empty:
+        st.dataframe(
+            papers,
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Download option
+        csv = papers.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download as CSV",
+            csv,
+            "papers.csv",
+            "text/csv",
+            key='download-csv'
+        )
+    else:
+        st.info("No papers found in the database.")
+        
+except Exception as e:
+    st.error(f"Error: {str(e)}")
+import streamlit as st
+import pandas as pd
+import psycopg
 
 # Choose a writable directory for Streamlit config (repo root works fine)
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]  # .../literature-os
