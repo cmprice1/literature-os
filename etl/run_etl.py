@@ -20,26 +20,40 @@ def get_inbox_key(z):
     return None
 
 def main():
+    print("🔗 Connecting to Zotero...")
     z = get_client()
+    print("✅ Connected.")
+
     inbox_key = get_inbox_key(z)
     if not inbox_key:
-        print(f"Collection '{INBOX_COLLECTION}' not found"); return
+        print(f"❌ Collection '{INBOX_COLLECTION}' not found")
+        return
+    print(f"📂 Found inbox collection: {inbox_key}")
 
     items = z.collection_items(inbox_key, limit=100)
+    print(f"📄 Retrieved {len(items)} items from Zotero.")
 
-    for it in items:
+    for i, it in enumerate(items, 1):
         d = it["data"]
         doi = d.get("DOI") or ""
         title = d.get("title") or ""
-        abstract = d.get("abstractNote") or ""
-        pub_types = d.get("publicationType") or []
+        print(f"\n--- Processing item {i}/{len(items)} ---")
+        print(f"Title: {title}")
+        print(f"DOI: {doi}")
 
         # augment metadata
         cr = crossref_meta(doi)
+        print(f"Crossref: {cr}")
         oa = unpaywall_oa(doi, UNPAYWALL_EMAIL)
+        print(f"Unpaywall: {oa}")
         cx = openalex_citations(doi)
-        tags = set(infer_tags(pub_types, title or cr.get("title",""), abstract))
+        print(f"OpenAlex: {cx}")
+
+        tags = set(infer_tags(d.get("publicationType") or [],
+                              title or cr.get("title", ""),
+                              d.get("abstractNote") or ""))
         tags.add("status:screened")
+        print(f"Tags: {tags}")
 
         # write
         paper_id = upsert_paper(
@@ -49,12 +63,15 @@ def main():
             title=title or cr.get("title") or "(untitled)",
             journal=cr.get("journal"),
             year=cr.get("year"),
-            abstract=abstract,
+            abstract=d.get("abstractNote"),
             oa_status=oa.get("oa_status"),
             best_pdf_url=oa.get("best_pdf_url"),
             citation_count=cx.get("citation_count"),
         )
+        print(f"✅ Upserted paper ID {paper_id}")
         upsert_tags(paper_id, tags)
+        print(f"✅ Tags upserted")
+
 
 if __name__ == "__main__":
     main()
