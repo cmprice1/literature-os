@@ -1,8 +1,17 @@
+[global]
+dataFrameSerialization = "legacy"
+developmentMode = false
+
 [browser]
 gatherUsageStats = false
+serverAddress = "0.0.0.0"
 
 [client]
 showErrorDetails = true
+toolbarMode = "minimal"
 
 [server]
 runOnSave = true
+fileWatcherType = "none"
+headless = true
+enableCORS = true
