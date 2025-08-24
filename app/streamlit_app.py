@@ -11,50 +11,170 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# Configure Streamlit paths for HF Space
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if os.environ.get("HOME", "/") in ("/", "", None):
+    os.environ["HOME"] = str(PROJECT_ROOT)
+os.environ.setdefault("XDG_CONFIG_HOME", os.environ["HOME"])
+os.makedirs(os.path.join(os.environ["HOME"], ".streamlit"), exist_ok=True)
+
 # Database connection
 @st.cache_resource
-def get_connection():
-    return psycopg.connect(os.environ["DB_READER_DSN"])
+def get_db():
+    """Get database connection"""
+    try:
+        return psycopg.connect(
+            os.environ["DB_READER_DSN"],
+            application_name="literature-os-streamlit"
+        )
+    except Exception as e:
+        st.error(f"Database connection failed: {str(e)}")
+        raise
 
-# Data loading functions
 @st.cache_data(ttl=300)
-def get_papers(_conn, search=None):
-    query = """
-        SELECT 
-            id,
-            title,
-            journal,
-            year,
-            doi,
-            citation_count
-        FROM papers
-        ORDER BY year DESC NULLS LAST, citation_count DESC NULLS LAST
-        LIMIT 200
-    """
-    
-    with _conn.cursor() as cur:
-        cur.execute(query)
-        rows = cur.fetchall()
+def load_metadata(_conn):
+    """Load tags and years from database"""
+    try:
+        with _conn.cursor() as cur:
+            # Get tags
+            cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
+            tags = [r[0] for r in cur.fetchall() if r[0]]
+            
+            # Get years
+            cur.execute("""
+                SELECT DISTINCT year 
+                FROM papers 
+                WHERE year IS NOT NULL AND year BETWEEN 1900 AND 2100
+                ORDER BY year DESC
+            """)
+            years = [r[0] for r in cur.fetchall() if r[0]]
+            
+        return tags or [], years or list(range(2010, 2026))
+    except Exception as e:
+        st.error(f"Failed to load metadata: {str(e)}")
+        return [], list(range(2010, 2026))
+
+@st.cache_data(ttl=300)
+def query_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
+    """Query papers with filters"""
+    try:
+        sql = """
+            SELECT 
+                id,
+                COALESCE(title, '(No title)') as title,
+                COALESCE(journal, '(No journal)') as journal,
+                year,
+                COALESCE(doi, '') as doi,
+                COALESCE(citation_count, 0) as citation_count
+            FROM papers
+            WHERE 1=1
+        """
+        params = []
         
-    return pd.DataFrame(
-        rows,
-        columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"]
-    )
+        # Apply filters
+        if tags:
+            sql += " AND id IN (SELECT paper_id FROM tags WHERE tag = ANY(%s))"
+            params.append([str(t) for t in tags])
+            
+        if year_start is not None and year_end is not None:
+            sql += " AND year BETWEEN %s AND %s"
+            params.extend([int(year_start), int(year_end)])
+            
+        if search:
+            sql += " AND (title ILIKE %s OR abstract ILIKE %s)"
+            search = f"%{search.strip()}%"
+            params.extend([search, search])
+            
+        sql += " ORDER BY year DESC NULLS LAST, citation_count DESC NULLS LAST LIMIT 200"
+        
+        # Run query
+        with _conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            
+        # Convert to DataFrame
+        df = pd.DataFrame(
+            rows,
+            columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"]
+        )
+        
+        # Fix types
+        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+        df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce").fillna(0).astype(int)
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Query failed: {str(e)}")
+        return pd.DataFrame(columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"])
 
 # Main app
 st.title("Literature OS")
+st.caption("Last updated via GitHub → HF sync ✅")
 
+# Database connection
 try:
-    # Connect to database
-    conn = get_connection()
+    db = get_db()
     
-    # Load and display papers
-    papers = get_papers(conn)
+    # Load filter options
+    tags, years = load_metadata(db)
     
-    if not papers.empty:
+    # Filter section
+    st.subheader("📋 Filter Papers")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Search box
+        search = st.text_input(
+            "Search titles & abstracts",
+            help="Enter keywords to search in paper titles and abstracts"
+        )
+        
+        # Year range
+        year_range = st.slider(
+            "Year range",
+            min_value=2010,
+            max_value=2025,
+            value=(2015, 2025),
+            help="Filter papers by publication year"
+        )
+    
+    with col2:
+        # Tag selection
+        selected_tags = st.multiselect(
+            "Filter by tags",
+            options=sorted(tags),
+            help="Select tags to filter papers"
+        )
+    
+    # Query papers with filters
+    papers = query_papers(
+        db,
+        tags=selected_tags,
+        year_start=year_range[0],
+        year_end=year_range[1],
+        search=search
+    )
+    
+    # Display results
+    st.subheader(f"📚 Results ({len(papers)} papers)")
+    
+    if papers.empty:
+        st.info("No papers found matching your criteria.")
+    else:
+        # Add clickable DOI links
+        papers['DOI'] = papers['DOI'].apply(lambda x: f'[{x}](https://doi.org/{x})' if x else '')
+        
+        # Display table
         st.dataframe(
             papers,
             use_container_width=True,
+            column_config={
+                "DOI": st.column_config.LinkColumn("DOI"),
+                "Citations": st.column_config.NumberColumn("Citations", format="%d"),
+                "Year": st.column_config.NumberColumn("Year", format="%d")
+            },
             hide_index=True
         )
         
@@ -67,26 +187,182 @@ try:
             "text/csv",
             key='download-csv'
         )
-    else:
-        st.info("No papers found in the database.")
-        
+
 except Exception as e:
-    st.error(f"Error: {str(e)}")
-import streamlit as st
-import pandas as pd
-import psycopg
+    st.error(f"Application error: {str(e)}")
 
-# Choose a writable directory for Streamlit config (repo root works fine)
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]  # .../literature-os
-# If HOME is '/' or empty, redirect it to the project root
-if os.environ.get("HOME", "/") in ("/", "", None):
-    os.environ["HOME"] = str(PROJECT_ROOT)
+# Database functions
+@st.cache_resource
+def get_db():
+    """Get database connection"""
+    try:
+        return psycopg.connect(
+            os.environ["DB_READER_DSN"],
+            application_name="literature-os-streamlit"
+        )
+    except Exception as e:
+        st.error(f"Database connection failed: {str(e)}")
+        raise
 
-# Ensure config dir exists and point XDG there too
-os.environ.setdefault("XDG_CONFIG_HOME", os.environ["HOME"])
-CONFIG_DIR = os.path.join(os.environ["HOME"], ".streamlit")
-os.makedirs(CONFIG_DIR, exist_ok=True)
-# --------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def load_tags_years(_conn):
+    """Load tags and years from database"""
+    try:
+        with _conn.cursor() as cur:
+            # Get tags
+            cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
+            tags = [r[0] for r in cur.fetchall() if r[0]]
+            
+            # Get years
+            cur.execute("""
+                SELECT DISTINCT year 
+                FROM papers 
+                WHERE year IS NOT NULL AND year BETWEEN 1900 AND 2100
+                ORDER BY year DESC
+            """)
+            years = [r[0] for r in cur.fetchall() if r[0]]
+            
+        return tags or [], years or list(range(2010, 2026))
+    except Exception as e:
+        st.error(f"Failed to load metadata: {str(e)}")
+        return [], list(range(2010, 2026))
+
+@st.cache_data(ttl=300)
+def query_papers(_conn, tags=None, year_start=None, year_end=None, search=None):
+    """Query papers with filters"""
+    try:
+        sql = """
+            SELECT 
+                id,
+                COALESCE(title, '(No title)') as title,
+                COALESCE(journal, '(No journal)') as journal,
+                year,
+                COALESCE(doi, '') as doi,
+                COALESCE(citation_count, 0) as citation_count
+            FROM papers
+            WHERE 1=1
+        """
+        params = []
+        
+        # Apply filters
+        if tags:
+            sql += " AND id IN (SELECT paper_id FROM tags WHERE tag = ANY(%s))"
+            params.append([str(t) for t in tags])
+            
+        if year_start and year_end:
+            sql += " AND year BETWEEN %s AND %s"
+            params.extend([year_start, year_end])
+            
+        if search:
+            sql += " AND (title ILIKE %s OR abstract ILIKE %s)"
+            search = f"%{search}%"
+            params.extend([search, search])
+            
+        sql += " ORDER BY year DESC NULLS LAST, citation_count DESC NULLS LAST LIMIT 200"
+        
+        # Run query
+        with _conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            
+        # Convert to DataFrame
+        df = pd.DataFrame(
+            rows,
+            columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"]
+        )
+        
+        # Fix types
+        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+        df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce").fillna(0).astype(int)
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Query failed: {str(e)}")
+        return pd.DataFrame(columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"])
+
+# Main app
+st.title("Literature OS")
+st.caption("Last updated via GitHub → HF sync ✅")
+
+# Database connection
+try:
+    db = get_db()
+    
+    # Load filter options
+    tags, years = load_tags_years(db)
+    
+    # Filter section
+    st.subheader("📋 Filter Papers")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Search box
+        search = st.text_input(
+            "Search titles & abstracts",
+            help="Enter keywords to search in paper titles and abstracts"
+        )
+        
+        # Year range
+        year_range = st.slider(
+            "Year range",
+            min_value=2010,
+            max_value=2025,
+            value=(2015, 2025),
+            help="Filter papers by publication year"
+        )
+    
+    with col2:
+        # Tag selection
+        selected_tags = st.multiselect(
+            "Filter by tags",
+            options=sorted(tags),
+            help="Select tags to filter papers"
+        )
+    
+    # Query papers with filters
+    papers = query_papers(
+        db,
+        tags=selected_tags,
+        year_start=year_range[0],
+        year_end=year_range[1],
+        search=search
+    )
+    
+    # Display results
+    st.subheader(f"📚 Results ({len(papers)} papers)")
+    
+    if papers.empty:
+        st.info("No papers found matching your criteria.")
+    else:
+        # Add clickable DOI links
+        papers['DOI'] = papers['DOI'].apply(lambda x: f'[{x}](https://doi.org/{x})' if x else '')
+        
+        # Display table
+        st.dataframe(
+            papers,
+            use_container_width=True,
+            column_config={
+                "DOI": st.column_config.LinkColumn("DOI"),
+                "Citations": st.column_config.NumberColumn("Citations", format="%d"),
+                "Year": st.column_config.NumberColumn("Year", format="%d")
+            },
+            hide_index=True
+        )
+        
+        # Download option
+        csv = papers.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download as CSV",
+            csv,
+            "papers.csv",
+            "text/csv",
+            key='download-csv'
+        )
+
+except Exception as e:
+    st.error(f"Application error: {str(e)}")
 
 
 import streamlit as st
@@ -157,32 +433,11 @@ def safe_escape_like(text):
         return text
     return text.replace('%', '\\%').replace('_', '\\_')
 
-def query(c, tags=None, y0=None, y1=None, q=None):
+@st.cache_data(ttl=300)
+def query(_c, tags=None, y0=None, y1=None, q=None):
     """Query papers with safe parameter handling"""
     try:
-        where = []; params = []
-        
-        # Handle tags (ensure it's a list and not empty)
-        if tags and isinstance(tags, (list, tuple)) and len(tags) > 0:
-            where.append("id IN (SELECT paper_id FROM tags WHERE tag = ANY(%s))")
-            params.append(list(tags))  # Convert to list to be safe
-            
-        # Handle years (ensure they're valid numbers)
-        if y0 is not None and y1 is not None:
-            try:
-                y0, y1 = int(y0), int(y1)
-                where.append("(year IS NOT NULL AND year BETWEEN %s AND %s)")
-                params += [y0, y1]
-            except (ValueError, TypeError):
-                st.warning("Invalid year range, ignoring year filter")
-                
-        # Handle search query (escape special characters)
-        if q and isinstance(q, str) and q.strip():
-            q = safe_escape_like(q.strip())
-            where.append("(title ILIKE %s OR COALESCE(abstract, '') ILIKE %s)")
-            params += [f"%{q}%", f"%{q}%"]
-        
-        # Build and execute query
+        # Start with base query
         sql = """
             SELECT 
                 id,
@@ -192,10 +447,25 @@ def query(c, tags=None, y0=None, y1=None, q=None):
                 COALESCE(doi, '') as doi,
                 COALESCE(citation_count, 0) as citation_count
             FROM papers
+            WHERE 1=1
         """
+        params = []
         
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+        # Add filters one by one, with safe type checking
+        if tags and isinstance(tags, (list, tuple)) and tags:
+            sql += " AND id IN (SELECT paper_id FROM tags WHERE tag = ANY(%s))"
+            params.append([str(t) for t in tags])  # Ensure all tags are strings
+            
+        if y0 is not None and y1 is not None:
+            sql += " AND (year IS NOT NULL AND year BETWEEN %s AND %s)"
+            params.extend([int(y0), int(y1)])
+                
+        if q and isinstance(q, str) and (q := q.strip()):  # Assignment expression
+            sql += " AND (title ILIKE %s OR abstract ILIKE %s)"
+            q = f"%{q}%"
+            params.extend([q, q])
+            
+        # Always add ordering and limit
         sql += " ORDER BY year DESC NULLS LAST, citation_count DESC NULLS LAST LIMIT 200"
         
         # Debug information in expandable section
@@ -220,83 +490,42 @@ def query(c, tags=None, y0=None, y1=None, q=None):
         # Return empty DataFrame instead of raising
         return pd.DataFrame(columns=["id","Title","Journal","Year","DOI","Citations"])
 
-# Initialize session state for filters
-if 'filters' not in st.session_state:
-    st.session_state.filters = {
-        'search': '',
-        'tags': [],
-        'year_range': (2015, 2025)
-    }
+# Main app
+st.title("Literature OS - MVP")
 
-# Main app with comprehensive error handling
+# Simple database connection - no retries
 try:
-    st.title("Literature OS - MVP")
-    
-    # Show any accumulated errors in debug section
-    if st.session_state.error_log:
-        with st.expander("🔍 Debug Log", expanded=False):
-            for error in st.session_state.error_log:
-                st.error(error)
-    
-    # Database connection with retry
-    for attempt in range(3):  # Try 3 times
-        try:
-            c = conn()
-            st.success("Connected to database ✅")
-            break
-        except Exception as e:
-            if attempt == 2:  # Last attempt
-                st.error("Database connection failed")
-                st.error(str(e))
-                st.stop()
-            continue
+    c = conn()
+    st.success("Connected to database ✅")
+except Exception as e:
+    st.error(f"Database connection failed: {str(e)}")
+    st.stop()
 
-    # Load metadata with fallbacks
-    try:
-        all_tags, years = load_tags_years(c)
-    except Exception as e:
-        st.error("Error loading filters")
-        with st.expander("Error details"):
-            st.code(str(e))
-        # Use fallback values
-        all_tags, years = [], list(range(2010, 2026))
+# Load metadata with fallbacks
+try:
+    all_tags, years = load_tags_years(c)
+except Exception as e:
+    st.error(f"Error loading filters: {str(e)}")
+    all_tags, years = [], list(range(2010, 2026))
 
-    # Filter section in a container for visual grouping
-    with st.container():
-        st.subheader("📋 Filter Papers")
-        
-        try:
-            # Search box with clear instructions
-            search_query = st.text_input(
-                "Search titles & abstracts",
-                value=st.session_state.filters.get('search', ''),
-                help="Enter keywords to search in paper titles and abstracts",
-                key="search_input"
-            )
-            
-            # Update session state
-            st.session_state.filters['search'] = search_query
+# Filter section
+st.subheader("📋 Filter Papers")
 
-            # Year range with safe defaults
-            col1, col2 = st.columns(2)
-            with col1:
-                try:
-                    yr_min = min(y for y in years if isinstance(y, (int, float)))
-                except ValueError:
-                    yr_min = 2010
-                try:
-                    yr_max = max(y for y in years if isinstance(y, (int, float)))
-                except ValueError:
-                    yr_max = 2025
-                
-                year_range = st.slider(
-                    "Year range",
-                    min_value=yr_min,
-                    max_value=yr_max,
-                    value=st.session_state.filters.get('year_range', (max(2015, yr_min), yr_max)),
-                    help="Filter papers by publication year",
-                    key="year_slider"
-                )
+# Search box
+search_query = st.text_input(
+    "Search titles & abstracts",
+    value="",
+    help="Enter keywords to search in paper titles and abstracts"
+)
+
+# Year range (simplified)
+year_range = st.slider(
+    "Year range",
+    min_value=2010,
+    max_value=2025,
+    value=(2015, 2025),
+    help="Filter papers by publication year"
+)
                 
                 # Update session state
                 st.session_state.filters['year_range'] = year_range
