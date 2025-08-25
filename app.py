@@ -4,14 +4,12 @@ import gradio as gr
 from psycopg_pool import ConnectionPool
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DB pool (lazy-initialized, safe on Spaces)
+# DB pool (lazy init)
 # ──────────────────────────────────────────────────────────────────────────────
 _POOL: ConnectionPool | None = None
 
 def _ensure_sslmode(dsn: str) -> str:
-    if "sslmode=" in dsn:
-        return dsn
-    return f"{dsn}{'&' if '?' in dsn else '?'}sslmode=require"
+    return dsn if "sslmode=" in dsn else f"{dsn}{'&' if '?' in dsn else '?'}sslmode=require"
 
 def get_pool() -> ConnectionPool:
     global _POOL
@@ -21,10 +19,7 @@ def get_pool() -> ConnectionPool:
             raise RuntimeError("Missing DB_READER_DSN secret.")
         _POOL = ConnectionPool(
             conninfo=_ensure_sslmode(dsn),
-            min_size=1,
-            max_size=5,
-            max_lifetime=600,
-            timeout=10,
+            min_size=1, max_size=5, max_lifetime=600, timeout=10,
             kwargs={"application_name": "literature-os-gradio"},
         )
     return _POOL
@@ -65,7 +60,7 @@ def load_year_bounds_and_tags():
         min_year, max_year = 2010, 2025
     return min_year, max_year, tag_choices
 
-def q_papers(tags, y_min, y_max, search, limit):
+def q_papers(tags, y_min, y_max, search, limit) -> pd.DataFrame:
     sql = ["""
         SELECT
             p.id,
@@ -80,7 +75,6 @@ def q_papers(tags, y_min, y_max, search, limit):
     params: list = []
 
     if tags:
-        # Force text[] so psycopg3 param binding can't confuse the type
         sql.append(
             " AND EXISTS (SELECT 1 FROM tags t "
             "WHERE t.paper_id = p.id AND t.tag = ANY(%s::text[]))"
@@ -95,14 +89,13 @@ def q_papers(tags, y_min, y_max, search, limit):
 
     if search:
         q = f"%{search.strip()}%"
-        # Guard abstract in case the column doesn't exist or has NULLs
         sql.append(" AND (p.title ILIKE %s OR COALESCE(p.abstract,'') ILIKE %s)")
         params.extend([q, q])
 
     sql.append(" ORDER BY p.year DESC NULLS LAST, p.citation_count DESC NULLS LAST LIMIT %s")
     params.append(int(limit))
 
-    # Uncomment for debugging in HF logs:
+    # Debug to HF app logs (optional)
     # print("SQL:", "".join(sql)); print("PARAMS:", params)
 
     rows = run_sql("".join(sql), params)
@@ -119,18 +112,22 @@ def q_papers(tags, y_min, y_max, search, limit):
 def do_search(search, year_min, year_max, tags, limit):
     try:
         df = q_papers(tags, year_min, year_max, search, limit)
+        if df.empty:
+            return (
+                gr.update(value=df, visible=True),                     # table
+                gr.update(value=None, visible=False),                  # download
+                gr.update(value="No results. Try widening years or clearing tags/search.", visible=True),
+            )
         return (
-            df,
-            gr.update(visible=True),   # show table
-            gr.update(visible=True),   # show download button
-            gr.update(value="", visible=False),  # hide error
+            gr.update(value=df, visible=True),                         # table
+            gr.update(value="/tmp/papers.csv", visible=True),          # placeholder; real path set in then()
+            gr.update(value="", visible=False),                        # hide error
         )
     except Exception as e:
         return (
-            pd.DataFrame(),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            gr.update(value=f"**Query failed:** {e}", visible=True),
+            gr.update(value=pd.DataFrame(), visible=False),            # hide table
+            gr.update(value=None, visible=False),                      # hide download
+            gr.update(value=f"**Query failed:** {e}", visible=True),   # show error
         )
 
 def prepare_download(df):
@@ -160,7 +157,7 @@ def db_ping():
 with gr.Blocks(theme="soft") as demo:
     gr.Markdown("## Literature OS")
 
-    # Bounds & tags (don’t crash UI if DB not ready)
+    # Bounds & tags
     errbox = gr.Markdown(visible=False)
     try:
         MIN_Y, MAX_Y, TAG_CHOICES = load_year_bounds_and_tags()
@@ -185,7 +182,7 @@ with gr.Blocks(theme="soft") as demo:
     run_btn.click(
         fn=do_search,
         inputs=[search, year_min, year_max, tags, limit],
-        outputs=[out, out, dl_btn, errbox],
+        outputs=[out, dl_btn, errbox],
         preprocess=False,
         postprocess=False,
     ).then(
