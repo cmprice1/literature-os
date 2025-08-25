@@ -95,8 +95,7 @@ def q_papers(tags, y_min, y_max, search, limit) -> pd.DataFrame:
     sql.append(" ORDER BY p.year DESC NULLS LAST, p.citation_count DESC NULLS LAST LIMIT %s")
     params.append(int(limit))
 
-    # Debug to HF app logs (optional)
-    # print("SQL:", "".join(sql)); print("PARAMS:", params)
+    # print("SQL:", "".join(sql)); print("PARAMS:", params)  # debug if needed
 
     rows = run_sql("".join(sql), params)
     df = pd.DataFrame(rows, columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"])
@@ -114,20 +113,20 @@ def do_search(search, year_min, year_max, tags, limit):
         df = q_papers(tags, year_min, year_max, search, limit)
         if df.empty:
             return (
-                gr.update(value=df, visible=True),                     # table
-                gr.update(value=None, visible=False),                  # download
+                gr.update(value=df, visible=True),
+                gr.update(value=None, visible=False),
                 gr.update(value="No results. Try widening years or clearing tags/search.", visible=True),
             )
         return (
-            gr.update(value=df, visible=True),                         # table
-            gr.update(value="/tmp/papers.csv", visible=True),          # placeholder; real path set in then()
-            gr.update(value="", visible=False),                        # hide error
+            gr.update(value=df, visible=True),
+            gr.update(value="/tmp/papers.csv", visible=True),  # filled by then()
+            gr.update(value="", visible=False),
         )
     except Exception as e:
         return (
-            gr.update(value=pd.DataFrame(), visible=False),            # hide table
-            gr.update(value=None, visible=False),                      # hide download
-            gr.update(value=f"**Query failed:** {e}", visible=True),   # show error
+            gr.update(value=pd.DataFrame(), visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=f"**Query failed:** {e}", visible=True),
         )
 
 def prepare_download(df):
@@ -176,15 +175,20 @@ with gr.Blocks(theme="soft") as demo:
         limit = gr.Slider(50, 1000, value=200, step=50, label="Row limit", interactive=True)
         run_btn = gr.Button("Search", variant="primary")
 
-    out = gr.Dataframe(visible=False)
+    out = gr.Dataframe(
+        headers=["ID","Title","Journal","Year","DOI","Citations"],
+        row_count=(0, "dynamic"),
+        col_count=(6, "fixed"),
+        interactive=False,
+        visible=False,
+    )
     dl_btn = gr.DownloadButton("Download CSV", visible=False, label="Download CSV")
 
+    # NOTE: allow default preprocess/postprocess so pandas DF is handled correctly
     run_btn.click(
         fn=do_search,
         inputs=[search, year_min, year_max, tags, limit],
         outputs=[out, dl_btn, errbox],
-        preprocess=False,
-        postprocess=False,
     ).then(
         fn=prepare_download,
         inputs=[out],
