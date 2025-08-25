@@ -106,9 +106,12 @@ def q_papers(tags, y_min, y_max, search, limit):
 def do_search(search, year_min, year_max, tags, limit):
     try:
         df = q_papers(tags, year_min, year_max, search, limit)
-        return df, gr.update(visible=True), gr.update(visible=True), ""
+        return df, gr.update(visible=True), gr.update(visible=True), gr.update(value="", visible=False)
     except Exception as e:
-        return pd.DataFrame(), gr.update(visible=False), gr.update(visible=False), f"Query failed: {e}"
+        return (pd.DataFrame(),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(value=f"**Query failed:** {e}", visible=True))
 
 def prepare_download(df):
     if df is None or getattr(df, "empty", True):
@@ -153,6 +156,24 @@ with gr.Blocks(theme="soft") as demo:
         inputs=[out],
         outputs=[dl_btn]
     )
+
+    test_btn = gr.Button("Test DB connection")
+
+    def db_ping():
+        try:
+            rows = run_sql("SELECT COUNT(*) FROM papers")
+            n = rows[0][0] if rows else 0
+            sample = run_sql("""SELECT id, title, year FROM papers ORDER BY year DESC NULLS LAST LIMIT 3""")
+            df = pd.DataFrame(sample, columns=["ID", "Title", "Year"])
+            msg = f"**papers count:** {n}"
+            return gr.update(value=msg, visible=True), gr.update(value=df, visible=True)
+        except Exception as e:
+            return gr.update(value=f"**DB ping failed:** {e}", visible=True), gr.update(visible=False)
+
+test_out_md = gr.Markdown(visible=False)
+test_out_df = gr.Dataframe(visible=False)
+test_btn.click(fn=db_ping, inputs=None, outputs=[test_out_md, test_out_df])
+
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
