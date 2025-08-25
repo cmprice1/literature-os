@@ -1,18 +1,17 @@
 import os
-import urllib.parse
 import pandas as pd
 import gradio as gr
 from psycopg_pool import ConnectionPool
 
-# ---------- DB Pool ----------
-_POOL = None
+# ──────────────────────────────────────────────────────────────────────────────
+# DB pool (lazy-initialized, safe on Spaces)
+# ──────────────────────────────────────────────────────────────────────────────
+_POOL: ConnectionPool | None = None
 
 def _ensure_sslmode(dsn: str) -> str:
-    # Append sslmode=require if not present
     if "sslmode=" in dsn:
         return dsn
-    sep = "&" if "?" in dsn else "?"
-    return f"{dsn}{sep}sslmode=require"
+    return f"{dsn}{'&' if '?' in dsn else '?'}sslmode=require"
 
 def get_pool() -> ConnectionPool:
     global _POOL
@@ -20,11 +19,13 @@ def get_pool() -> ConnectionPool:
         dsn = os.environ.get("DB_READER_DSN")
         if not dsn:
             raise RuntimeError("Missing DB_READER_DSN secret.")
-        dsn = _ensure_sslmode(dsn)
         _POOL = ConnectionPool(
-            conninfo=dsn,
-            min_size=1, max_size=5, max_lifetime=600, timeout=10,
-            kwargs={"application_name": "literature-os-gradio"}
+            conninfo=_ensure_sslmode(dsn),
+            min_size=1,
+            max_size=5,
+            max_lifetime=600,
+            timeout=10,
+            kwargs={"application_name": "literature-os-gradio"},
         )
     return _POOL
 
@@ -36,7 +37,9 @@ def run_sql(sql: str, params: list | tuple | None = None):
             cur.execute(sql, params or [])
             return cur.fetchall()
 
-# ---------- Data helpers ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Data helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def load_year_bounds_and_tags():
     min_year, max_year, tag_choices = 2010, 2025, []
     try:
@@ -47,8 +50,8 @@ def load_year_bounds_and_tags():
         """)
         if years and years[0]:
             lo, hi = years[0]
-            if lo: min_year = int(lo)
-            if hi: max_year = int(hi)
+            if lo is not None: min_year = int(lo)
+            if hi is not None: max_year = int(hi)
     except Exception:
         pass
 
@@ -58,7 +61,6 @@ def load_year_bounds_and_tags():
     except Exception:
         pass
 
-    # guardrails
     if min_year > max_year:
         min_year, max_year = 2010, 2025
     return min_year, max_year, tag_choices
@@ -75,10 +77,14 @@ def q_papers(tags, y_min, y_max, search, limit):
         FROM papers p
         WHERE 1=1
     """]
-    params = []
+    params: list = []
 
     if tags:
-        sql.append(" AND EXISTS (SELECT 1 FROM tags t WHERE t.paper_id = p.id AND t.tag = ANY(%s))")
+        # Force text[] so psycopg3 param binding can't confuse the type
+        sql.append(
+            " AND EXISTS (SELECT 1 FROM tags t "
+            "WHERE t.paper_id = p.id AND t.tag = ANY(%s::text[]))"
+        )
         params.append(tags)
 
     if y_min is not None and y_max is not None:
@@ -89,11 +95,15 @@ def q_papers(tags, y_min, y_max, search, limit):
 
     if search:
         q = f"%{search.strip()}%"
-        sql.append(" AND (p.title ILIKE %s OR p.abstract ILIKE %s)")
+        # Guard abstract in case the column doesn't exist or has NULLs
+        sql.append(" AND (p.title ILIKE %s OR COALESCE(p.abstract,'') ILIKE %s)")
         params.extend([q, q])
 
     sql.append(" ORDER BY p.year DESC NULLS LAST, p.citation_count DESC NULLS LAST LIMIT %s")
     params.append(int(limit))
+
+    # Uncomment for debugging in HF logs:
+    # print("SQL:", "".join(sql)); print("PARAMS:", params)
 
     rows = run_sql("".join(sql), params)
     df = pd.DataFrame(rows, columns=["ID", "Title", "Journal", "Year", "DOI", "Citations"])
@@ -103,15 +113,25 @@ def q_papers(tags, y_min, y_max, search, limit):
         df["DOI"] = df["DOI"].map(lambda x: f"https://doi.org/{x.strip()}" if x and str(x).strip() else "")
     return df
 
+# ──────────────────────────────────────────────────────────────────────────────
+# UI handlers
+# ──────────────────────────────────────────────────────────────────────────────
 def do_search(search, year_min, year_max, tags, limit):
     try:
         df = q_papers(tags, year_min, year_max, search, limit)
-        return df, gr.update(visible=True), gr.update(visible=True), gr.update(value="", visible=False)
+        return (
+            df,
+            gr.update(visible=True),   # show table
+            gr.update(visible=True),   # show download button
+            gr.update(value="", visible=False),  # hide error
+        )
     except Exception as e:
-        return (pd.DataFrame(),
-                gr.update(visible=False),
-                gr.update(visible=False),
-                gr.update(value=f"**Query failed:** {e}", visible=True))
+        return (
+            pd.DataFrame(),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(value=f"**Query failed:** {e}", visible=True),
+        )
 
 def prepare_download(df):
     if df is None or getattr(df, "empty", True):
@@ -120,22 +140,39 @@ def prepare_download(df):
     df.to_csv(path, index=False)
     return path
 
-# ---------- UI ----------
+def db_ping():
+    try:
+        rows = run_sql("SELECT COUNT(*) FROM papers")
+        n = rows[0][0] if rows else 0
+        sample = run_sql(
+            "SELECT id, title, year FROM papers "
+            "ORDER BY year DESC NULLS LAST LIMIT 3"
+        )
+        df = pd.DataFrame(sample, columns=["ID", "Title", "Year"])
+        msg = f"**papers count:** {n}"
+        return gr.update(value=msg, visible=True), gr.update(value=df, visible=True)
+    except Exception as e:
+        return gr.update(value=f"**DB ping failed:** {e}", visible=True), gr.update(visible=False)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# App
+# ──────────────────────────────────────────────────────────────────────────────
 with gr.Blocks(theme="soft") as demo:
     gr.Markdown("## Literature OS")
-    errbox = gr.Markdown(visible=False)
 
-    # Try to read bounds & tags; if DB auth is bad, we still render UI
+    # Bounds & tags (don’t crash UI if DB not ready)
+    errbox = gr.Markdown(visible=False)
     try:
         MIN_Y, MAX_Y, TAG_CHOICES = load_year_bounds_and_tags()
     except Exception as e:
         MIN_Y, MAX_Y, TAG_CHOICES = 2010, 2025, []
         errbox.value = f"Warning: could not load tags/years ({e}). Check DB_READER_DSN."
+        errbox.visible = True
 
     with gr.Row():
         search = gr.Textbox(label="Search titles & abstracts", placeholder="ketamine depression…")
     with gr.Row():
-        year_min = gr.Slider(MIN_Y, MAX_Y, value=max(MIN_Y, MAX_Y-10), step=1, label="Year min", interactive=True)
+        year_min = gr.Slider(MIN_Y, MAX_Y, value=max(MIN_Y, MAX_Y - 10), step=1, label="Year min", interactive=True)
         year_max = gr.Slider(MIN_Y, MAX_Y, value=MAX_Y, step=1, label="Year max", interactive=True)
     tags = gr.CheckboxGroup(choices=TAG_CHOICES, label="Tags (optional)")
     with gr.Row():
@@ -157,23 +194,12 @@ with gr.Blocks(theme="soft") as demo:
         outputs=[dl_btn]
     )
 
-    test_btn = gr.Button("Test DB connection")
-
-    def db_ping():
-        try:
-            rows = run_sql("SELECT COUNT(*) FROM papers")
-            n = rows[0][0] if rows else 0
-            sample = run_sql("""SELECT id, title, year FROM papers ORDER BY year DESC NULLS LAST LIMIT 3""")
-            df = pd.DataFrame(sample, columns=["ID", "Title", "Year"])
-            msg = f"**papers count:** {n}"
-            return gr.update(value=msg, visible=True), gr.update(value=df, visible=True)
-        except Exception as e:
-            return gr.update(value=f"**DB ping failed:** {e}", visible=True), gr.update(visible=False)
-
-test_out_md = gr.Markdown(visible=False)
-test_out_df = gr.Dataframe(visible=False)
-test_btn.click(fn=db_ping, inputs=None, outputs=[test_out_md, test_out_df])
-
+    gr.Markdown("---")
+    with gr.Row():
+        test_btn = gr.Button("Test DB connection")
+    test_out_md = gr.Markdown(visible=False)
+    test_out_df = gr.Dataframe(visible=False)
+    test_btn.click(fn=db_ping, inputs=None, outputs=[test_out_md, test_out_df])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=7860)
